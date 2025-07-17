@@ -1,0 +1,1732 @@
+# Guidelines: Dynamic Programming on a Nice Tree Decomposition
+
+## The DP table and state
+
+When visiting node $t$ with bag $B_t$ in a nice tree decomposition, we compute a DP table, which is a mapping `DP[t][state] = value`.
+
+States in parent node $t$ are derived from states in child nodes by applying the appropriate transition rules for each node type.
+
+*IMPORTANT*: You must think carefully about how to use the states of $X$ in the child node $t'$ in order to update the state of $X$ in the parent node $t$.
+
+## Extracting the final result from the root node
+
+During DP, we traverse the NTD from leaves to root in post-order, propagating states from child to parent.
+
+At the final stage we process the DP states at the root node, DP[root][state]. Importantly, the root bag is not necessarily empty, so all states must be checked for global solution validity and properly aggregated to return the final result.
+
+For WMC, sum the counts or total weights. For optimization, take the min/max weight according to the problem requirements.
+
+# The problem description
+
+You are asked to implement a dynamic programming solution to the following problem:
+```
+{{ description }}
+```
+
+# Your task
+
+In this case, the input graph has already been converted into a nice tree decomposition.
+
+You should implement:
+
+    1. A function that handles each of the four node types in the nice tree decomposition.
+
+    2. A function to extract the final result from the DP table at the root node.
+
+**Crucially, your implementation must operate *exclusively* on the provided nice tree decomposition.**
+
+Do not bypass this dynamic programming approach by performing a global computation on the input graph. If you attempt to do so, you will be disqualified. 
+
+Furthermore:
+
+1. You **must** implement a dynamic programming solution, no matter how difficult or time-consuming it may be. Failure to attempt a solution will result in disqualification and the lowest possible score.
+
+2. Your solution _must_ have time complexity O(n), where `n` is the number of vertices in the input graph. Note that your code will be evaluated against this requirement, i.e., it will be ensured to scale linearly in the number of vertices in the graph, even if it the constant is large.
+
+Note that in order for your solution to run in strictly linear time in `n`, the size of the state space per bag must be bounded by a function of the bag size alone. For instance, storing all the vertices seen so far, or the number of edges seen so far, is strictly prohibited and will result in immediate disqualification. 
+
+# Provided utilities
+
+Below you'll find the class `Graph` which represents the input graph, and useful type aliases.
+
+```
+# The DP state type
+DPState = TypeVar("DPState")
+
+# Tree decomposition bag. Represents a set of vertices from the original graph.
+Bag: TypeAlias = set[int]
+
+
+@dataclass
+class Graph:
+    """Represents an undirected input graph with vertex or edge weights."""
+
+    # The number of vertices in the graph.
+    n: int
+
+    # The number of edges in the graph.
+    m: int
+
+    # A list of pairs of integers -- each representing an edge of the graph.
+    edges: list[tuple[int, int]]
+
+    # The weight of each edge, where `edge_weights[idx]` is the weight of the
+    # `idx`-th edge, in the `edges` list.
+    edge_weights: list[int] | None = None
+
+    # Map of vertex -> weight.
+    vertex_weights: defaultdict[int, int] | None = None
+
+    # Map of vertex -> { set of indices of edges in which it appears }
+    _incidence: dict[int, set[int]] = None
+
+    # Map of vertex -> { set of vertices to which it is adjacent }
+    _adj: dict[int, set[int]] = None
+
+    def __post_init__(self):
+
+        # Ensure the edge weights are fine.
+        assert len(self.edges) == self.m
+        if self.edge_weights is not None:
+            assert all(self.edge_weights[idx] is not None for idx in range(len(self.edges)))
+
+        # Populate the adjacency and incidence maps.
+        adj = defaultdict(set)
+        incidence = defaultdict(set)
+        for idx, (u, v) in enumerate(self.edges):
+            adj[u].add(v)
+            adj[v].add(u)
+            incidence[u].add(idx)
+            incidence[v].add(idx)
+        self._adj = adj
+        self._incidence = incidence
+
+    def neighbors(self, v: int) -> set[int]:
+        return self._adj[v]
+
+    def induced_subgraph(self, vertices: list[int]) -> "Graph":
+        """
+        @brief Creates the induced subgraph over the given set of vertices, keeping the original
+               vertex labels.
+        @param vertices A list of vertex indices (original labels) to include in the subgraph.
+        @return A new Graph object representing the induced subgraph. This graph is a 'view'
+                in the sense that it uses the original vertex labels, but it is a new Graph
+                object and modifications to it will not affect the original graph.
+        """
+
+        induced_vertices_set = set(vertices)
+        subgraph_n = len(induced_vertices_set)
+
+        # Collect the vertex weights, if relevant.
+        subgraph_vertex_weights = None
+        if self.vertex_weights is not None:
+            subgraph_vertex_weights = defaultdict(int)
+            for v_label in induced_vertices_set:
+                w = self.vertex_weights.get(v_label, None)
+                if w is not None:
+                    subgraph_vertex_weights[v_label] = w
+
+        # Collect the edge weights, if relevant.
+        subgraph_edges = []
+        subgraph_edge_weights = [] if self.edge_weights is not None else None
+        processed_edge_indices = set()
+        subgraph_m = 0
+
+        for v in induced_vertices_set:
+
+            for edge_idx in self._incidence.get(v, set()):
+                if edge_idx in processed_edge_indices:
+                    continue  # This edge has already been processed from its other endpoint
+
+                u, w = self.edges[edge_idx]
+
+                # An edge (u, w) is part of the induced subgraph if both u and w are in
+                # the set of induced vertices.
+                if u in induced_vertices_set and w in induced_vertices_set:
+                    subgraph_edges.append((u, w))
+                    if self.edge_weights is not None:
+                        subgraph_edge_weights.append(self.edge_weights[edge_idx])
+                    subgraph_m += 1
+
+                # Mark the edge as processed so it's not added again (even if not induced)
+                processed_edge_indices.add(edge_idx)
+
+        return Graph(
+            n=subgraph_n,
+            m=subgraph_m,
+            edges=subgraph_edges,
+            edge_weights=subgraph_edge_weights,
+            vertex_weights=subgraph_vertex_weights,
+        )
+```
+
+# Function Signatures to Implement
+
+As mentioned before, the decomposition of the input graph into a nice tree decomposition, and the traversal over this NTD, are already taken care of. Your task, is to only implement the following functions, which handle each of the node types, and an additional function, which is used to extract the final value from the root of the NTD. The names and signatures of these functions must be exactly as described below.
+
+```
+def leaf_callback(
+    graph: Graph,
+    cur_table: dict[DPState, int],
+    cur_bag_info: tuple[int, Bag],
+    leaf_vertex: int,
+):
+    """
+    Handles a leaf node in the nice tree decomposition.
+
+    At a leaf node t with bag B_t = {leaf_vertex}, we initialize the DP table with all valid
+    base states involving only the single vertex `leaf_vertex`. These states represent trivial
+    partial solutions X over a single vertex and set the foundation for the DP recursion.
+
+    Args:
+        graph: The input graph, induced over the vertices in the bag.
+        cur_table: The DP table for the current node t to be populated - DP[t].
+        cur_bag_info: Tuple (t, B_t), where B_t is the bag at node t (B_t = {leaf_vertex}), and t is the bag index.
+        leaf_vertex: The single vertex in the leaf bag.
+    """
+    raise NotImplementedError()
+
+def introduce_callback(
+    graph: Graph,
+    cur_table: dict[DPState, int],
+    cur_bag_info: tuple[int, Bag],
+    child_table: dict[DPState, int],
+    child_bag_info: tuple[int, Bag],
+    introduced_vertex: int,
+):
+    """
+    Handles an introduce node in the nice tree decomposition.
+
+    In an introduce node t with child t', we have B_t = B_{t'} ∪ {introduced_vertex}.
+    The vertex `introduced_vertex` is being introduced and appears for the first time here.
+    We must update the DP table by extending each child state from t' to include `introduced_vertex` in all valid ways.
+    This typically involves checking how `introduced_vertex` connects to the rest of the bag and adjusting state properties.
+
+    If multiple configurations in the child DP table DP[t'] project to the same configuration in in the parent
+    DP table DP[t], aggregate their results by taking min/max according to the problem.
+    Store the resulting configurations and their optimal weights in DP[t].
+
+    Args:
+        graph: The input graph, induced over the vertices in the bag.
+        cur_table: The DP table for the current node t to be populated - DP[t']
+        cur_bag_info: Tuple (t, B_t), where B_t = B_{t'} ∪ {introduced_vertex}, and t is the bag index.
+        child_table: The DP table from the child node t' - DP[t'].
+        child_bag_info: Tuple (t', B_{t'}), the child node and its bag.
+        introduced_vertex: The vertex being introduced.
+    """
+    raise NotImplementedError()
+
+def forget_callback(
+    graph: Graph,
+    cur_table: dict[DPState, int],
+    cur_bag_info: tuple[int, Bag],
+    child_table: dict[DPState, int],
+    child_bag_info: tuple[int, Bag],
+    forgotten_vertex: int,
+):
+    """
+    Handles a forget node in the nice tree decomposition.
+
+    In a forget node t with child t′, we have B_t = B_{t′} \ {forgotten_vertex}.
+    The vertex `forgotten_vertex` is being forgotten and will not appear in any future bag.
+    For each state in DP[t′], remove `forgotten_vertex` to get a projected state over B_t.
+
+    If multiple child states project to the same state in DP[t], aggregate their values
+    (e.g., using min or max depending on the problem).
+    Store the resulting configurations and their optimal weights in DP[t].
+
+    Args:
+        graph: The input graph, induced over the vertices in B_t ∪ {forgotten_vertex}.
+        cur_table: The DP table for the current node t to be populated - DP[t].
+        cur_bag_info: Tuple (t, B_t), where B_t = B_{t′} \ {forgotten_vertex}.
+        child_table: The DP table from the child node t′ - DP[t′].
+        child_bag_info: Tuple (t′, B_{t′}), the child node and its bag.
+        forgotten_vertex: The vertex being forgotten.
+    """
+    raise NotImplementedError()
+
+def join_callback(
+    graph: Graph,
+    cur_table: dict[DPState, int],
+    cur_bag_info: tuple[int, Bag],
+    left_child_table: dict[DPState, int],
+    left_child_bag_info: tuple[int, Bag],
+    right_child_table: dict[DPState, int],
+    right_child_bag_info: tuple[int, Bag],
+):
+    """
+    Handles a join node in the nice tree decomposition.
+
+    A join node t has two children t_1 and t_2 with the same bag: B_t = B_{t_1} = B_{t_2}.
+    The subtree rooted at t represents the union of solutions from both children.
+    For every pair of compatible states from DP[t_1] and DP[t_2], merge them into a valid state over B_t.
+
+    If multiple such merges result in the same final state, aggregate their values
+    (e.g., using min or max depending on the problem).
+    Store the resulting configurations and their optimal weights in DP[t].
+
+    Args:
+        graph: The input graph, induced over the vertices in the bag.
+        cur_table: The DP table for the current node t to be populated - DP[t].
+        cur_bag_info: Tuple (t, B_t), the current node and its bag.
+        left_child_table: The DP table from the left child t_1 - DP[t_1].
+        left_child_bag_info: Tuple (t_1, B_{t_1}), the left child and its bag.
+        right_child_table: The DP table from the right child t_2 - DP[t_2].
+        right_child_bag_info: Tuple (t_2, B_{t_2}), the right child and its bag.
+    """
+    raise NotImplementedError()
+
+
+def extract_solution(root_table: dict[DPState, int]) -> int:
+    raise NotImplementedError()
+
+```
+
+Your objective is to implement the missing functions, with the exact signatures shown above.
+
+Your code must all be enclosed in a single Markdown code block, starting with ```python, and ending with ```.
+
+Do not reimplement any of the utility classes, such as 'Graph', etc.
+
+# Examples
+
+To help you in this task, enclosed below you will find several examples of problems, and their solutions.
+
+## Problem 1
+
+```
+## Description
+
+Task Type: Weighted Model Count (CSP-wMC).
+Explanation:
+    You are given a set of elements, where each element has a weight. Your goal is to compute the sum of weights of all the subsets that satisfy the constraints given below, modulo 10^9 + 7.
+    If there is no feasible set, the result of this task is -1.
+Constraints Definition:
+    In this question, the elements are the vertices of a graph, and the constraints are defined in graph-theoretic terms. A description of the graph family, the constraints, and the vertex weights is given below.
+    The constraints:
+        A subset of vertices such that there is exactly one connected component of size strictly greater than 3 and all the others are of size at most 3.
+    Input Graph:
+        A connected graph whose tree-width is at most 3, and in whose 'nice tree decomposition' the JOIN nodes have width at most 2 (i.e., every JOIN node contains at most 3 vertices).
+        The following variables are used to represent graphs in this family:
+            - `graph`: The graph.
+            - `n`: The number of vertices in the graph.
+            - `tree_decomposition`: The tree decomposition of the graph.
+    Vertex Weights:
+        Every vertex is assigned an integer weight. The list of weights is given in the variable `x_s`.
+
+## Input
+
+The input is composed of the following items, separated by newlines.
+
+- n:
+    An integer written on a single line.
+
+- x_s:
+    The first line contains a single integer representing the length of the list.
+    The second line contains a list of space-separated integers.
+
+- graph:
+    An undirected graph over the vertex set of non-negative integers (starting at zero).
+    The first line contains a single integer -- the number of vertices in the graph.
+    The second line contains a single integer -- the number of edges in the graph.
+    Every edge of the graph is then printed on a single line, as two space-separated integers.
+
+- tree_decomposition:
+    A tree decomposition of a graph.
+    The first line contains a single integer -- the number of bags in the tree decomposition.
+    The second line contains a single integer -- the number of edges in the tree decomposition.
+    Then, for every bag in the decomposition, there is a single line of space-separated integers, representing the vertices in the bag (the i-th line corresponds to the i-th bag).
+    Finally, every edge joining two bags of the tree decomposition is printed on a single line, as two space-separated integers, in ascending order. Note that the bags of the tree decomposition are indexed by non-negative integers, starting at zero.
+
+## Output
+
+A single integer: the sum of weights of all subsets that satisfy the constraints, modulo 10^9 + 7, or -1 is no such subset exists.
+
+## Constraints
+
+The following constraints must all be satisfied:
+
+n >= 4
+n <= 100
+
+## Time Limit
+
+100.00 seconds per test.
+```
+
+## Solution 1
+
+```python
+from __future__ import annotations
+import itertools
+import json
+from typing import Any, ClassVar, Dict, List, Tuple, Type, TypeAlias, TypeVar
+
+
+MOD = 10**9 + 7
+
+
+# -----------------------------------------------------------------------------
+# DP State and Value Dataclasses
+# -----------------------------------------------------------------------------
+@dataclass(frozen=True)
+class DPState:
+    """
+    Dynamic Programming state for the Connected Component Size constraint with exactly one exception.
+    This dataclass encapsulates the complete state information needed at each bag during
+    the tree decomposition-based dynamic programming algorithm.
+
+    The ConnectedSizeLessThanKWithExactlyOneException problem (with K=3) seeks a vertex subset X such that:
+    1. Each connected component in the induced subgraph G[X] has size < 3 (i.e., size ≤ 2)
+    2. Exactly one connected component is allowed to have size ≥ 3 (the "exception")
+    3. This creates a graph structure with mostly small components plus one larger component
+    4. The constraint is enforced incrementally during tree decomposition processing
+
+    Fields:
+    ( 1 ) component_statuses : Tuple[int, ...]   Status/label of each vertex in the current bag
+                                                 (sorted by vertex ID). Each status encodes:
+                                                 - 0: vertex NOT in the chosen set X ("OUT")
+                                                 - k > 0: vertex IN X, belonging to component with label k
+                                                 Labels are canonicalized so active components have labels 1,2,3,...
+
+    ( 2 ) component_sizes : Tuple[int, ...]      Current sizes of active connected components
+                                                 in the bag. component_sizes[i-1] gives the size
+                                                 of component with label i. Sizes are capped at 4
+                                                 since components ≥4 are considered "big exceptions".
+
+    ( 3 ) big_component_finalized : bool         True if we have already finalized (forgotten) at least
+                                                 one connected component of size ≥ 3. This tracks whether
+                                                 we have used our "one exception" allowance for a big component.
+
+    State Invariants and Semantics:
+    - Length of component_statuses equals the size of the current bag
+    - component_statuses[i] = 0 means bag vertex i is OUT (not in chosen set X)
+    - component_statuses[i] = k > 0 means bag vertex i is IN X and belongs to component k
+    - len(component_sizes) equals number of active components currently in the bag
+    - component_sizes[k-1] gives current size of component with label k
+    - big_component_finalized tracks whether we've already used our "one big component" allowance
+    - Component sizes are capped at 4 (larger components are treated as size 4)
+
+    Usage in Algorithm Phases:
+    - LEAF: Initialize single vertex as OUT (status=0) or IN with new component (status=1, size=1)
+    - INTRODUCE: Add vertex status, merge with neighbor components if connected, track size growth
+    - FORGET: Remove vertex status, finalize components when no vertices remain, update big_component_finalized
+    - JOIN: Merge compatible component assignments, combine sizes with overlap correction
+
+    Validation Rules:
+    - At most one big component (size ≥ 3) can be finalized throughout the computation
+    - Active components in the bag can have any size, but constraint is checked upon finalization
+    - States are invalid if big_component_finalized=True AND any active component has size ≥ 4
+    - This prevents having 2+ big components (one finalized + one active big component)
+
+    Implementation Notes:
+    - Uses canonicalized component labeling for consistent state representation
+    - Immutable and hashable structure enables efficient DP table lookups
+    - Tuple representations allow direct indexing and efficient comparison operations
+    - Component size tracking enables constraint validation during forget operations
+
+    Encoding Details:
+    - component_statuses[i] = 0: vertex at position i in sorted bag is OUT
+    - component_statuses[i] = k: vertex at position i in sorted bag belongs to component k
+    - component_sizes[k-1]: current size of component with label k
+    - big_component_finalized: boolean flag for constraint satisfaction tracking
+
+    Special Considerations for Size Bound K=3:
+    - Components of size ≥ 3 are considered "big" (violate the base constraint)
+    - Exactly one such big component is permitted as the "exception"
+    - All other components must have size ≤ 2 when finalized
+    - Size tracking is essential for enforcing this hybrid constraint
+
+    Canonicalization:
+    - Component labels are reassigned to 1,2,3,... in order of first appearance
+    - This ensures consistent state representation across different computation paths
+    - Canonicalization happens after component operations (merge, introduce, etc.)
+
+    All fields are immutable and hashable, making this object suitable as a dictionary key.
+    The encoding enables efficient component connectivity tracking and size constraint validation.
+    """
+
+    component_statuses: Tuple[int, ...]
+    component_sizes: Tuple[int, ...]
+    big_component_finalized: bool
+
+
+@dataclass
+class DPValue:
+    """
+    Dynamic Programming value representing the computational result for a given state.
+    This dataclass replaces the previous Tuple[int, int] representation with a more
+    structured and self-documenting approach for weighted model counting.
+
+    Fields:
+    ( 1 ) count  : int             Number of distinct vertex subsets X that achieve the current
+                                   state configuration and satisfy the connected component size
+                                   constraints with exactly one exception. This counts the
+                                   multiplicity of valid solutions for the current DP state.
+
+    ( 2 ) weight : int             Total weighted sum across all vertex subsets X that achieve
+                                   the current state configuration. Each valid solution contributes
+                                   its total vertex weight sum (sum of weights of vertices in X)
+                                   to this field.
+
+    Implementation Details:
+    - Both fields are maintained modulo MOD (10^9 + 7) for numerical stability
+    - The count field tracks the number of ways to achieve the current DP state
+    - The weight field accumulates total weight contribution from all valid component configurations
+    - Supports efficient aggregation during DP state transitions and merging
+
+    Combination Rules During DP Operations:
+    - LEAF: DPValue(count=1, weight=vertex_weight) for IN vertices, DPValue(count=1, weight=0) for OUT
+    - INTRODUCE: Update weight by adding vertex_weight * count when vertex enters X
+    - FORGET: Direct transfer of count and weight (constraint checked during state validation)
+    - JOIN: Complex combination using inclusion-exclusion principle:
+           count = left_count * right_count
+           weight = left_weight * right_count + right_weight * left_count - merged_count * bag_overlap_weight
+
+    Mathematical Properties:
+    - Linearity: Values can be added componentwise for compatible states
+    - Modularity: All arithmetic operations respect MOD to prevent integer overflow
+    - Non-negativity: Both count and weight are non-negative after modular reduction
+    - Monotonicity: Weights are non-decreasing as more vertices are added to X
+
+    Error Handling:
+    - Invalid states (e.g., 2+ big components) result in zero count/weight through pruning
+    - Constraint violations are filtered out during state transitions
+    - Modular arithmetic ensures all intermediate results stay within valid range
+
+    Special Considerations for Connected Component Size Constraints:
+    - Vertices contribute weight only when they are in the chosen set X
+    - Component size constraints are enforced upon component finalization (forget operations)
+    - The "exactly one exception" rule is tracked via big_component_finalized flag
+    - Final validation requires exactly one component of size ≥ 3 across the entire solution
+
+    Component Size Tracking:
+    - Small components (size ≤ 2) are allowed without restriction
+    - Large components (size ≥ 3) consume the "one exception" allowance
+    - Size bounds are enforced incrementally to maintain constraint satisfaction
+    - Component merging can create larger components, subject to size constraints
+
+    This structure enables simultaneous tracking of solution multiplicity and cumulative
+    weight during the tree decomposition DP computation for weighted model counting of
+    connected component size constraints with exactly one permitted exception.
+    """
+
+    count: int
+    weight: int
+
+
+Bag: TypeAlias = set[int]
+
+
+# ----------------------------------------------------------------------
+# Helper functions working on the canonical, immutable DPState
+# ----------------------------------------------------------------------
+def _canonicalise(statuses: List[int], comp_sizes: Dict[int, int]) -> DPState:
+    """
+    Re–labels the positive component-ids in `statuses` so that they become
+    1,2,3,… in the order of their first appearance.  `comp_sizes` is a dict
+    label → size *before* canonicalisation.  The return value is an immutable
+    DPState.
+    """
+    label_map: Dict[int, int] = {}
+    new_sizes: List[int] = []
+    # first pass – create new labels
+    for lab in statuses:
+        if lab == 0:
+            continue
+        if lab not in label_map:
+            label_map[lab] = len(label_map) + 1
+            new_sizes.append(comp_sizes[lab])
+    # second pass – produce canonicalised status tuple
+    statuses_new: List[int] = [0 if lab == 0 else label_map[lab] for lab in statuses]
+    return DPState(
+        component_statuses=tuple(statuses_new),
+        component_sizes=tuple(new_sizes),
+        big_component_finalized=False,  # big flag is filled later
+    )
+
+
+def _insert_tuple(t: Tuple[int, ...], idx: int, val: int) -> Tuple[int, ...]:
+    return t[:idx] + (val,) + t[idx:]
+
+
+def _remove_tuple(t: Tuple[int, ...], idx: int) -> Tuple[int, ...]:
+    return t[:idx] + t[idx + 1 :]
+
+
+def _state_with_new_components(
+    statuses: Tuple[int, ...],
+    comp_sizes: Tuple[int, ...],
+    big_finalised: bool,
+    bag_vertices: Tuple[int, ...],
+    merges: List[Tuple[int, int]],
+) -> DPState:
+    """
+    Utility used in Introduce/Join to merge components according to the list
+    `merges`, each entry being a pair of vertex indices whose components
+    must be merged.
+    """
+    # Build label -> size dict
+    label_to_size = {i + 1: comp_sizes[i] for i in range(len(comp_sizes))}
+    parent = {}
+
+    # union-find helpers on labels (not vertex indices)
+    def find(x):
+        parent.setdefault(x, x)
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        parent[rb] = ra
+        size_ra = label_to_size.get(ra, 0)
+        size_rb = label_to_size.get(rb, 0)
+        label_to_size[ra] = min(4, size_ra + size_rb)
+        label_to_size.pop(rb, None)
+
+    # initialise parent map
+    for lab in label_to_size.keys():
+        parent[lab] = lab
+    # perform requested merges
+    for i, j in merges:
+        lab_i, lab_j = statuses[i], statuses[j]
+        if lab_i == 0 or lab_j == 0:
+            continue
+        union(lab_i, lab_j)
+
+    # remap every label to its set representative
+    new_statuses_list = list(statuses)
+    for idx, lab in enumerate(new_statuses_list):
+        if lab != 0:
+            new_statuses_list[idx] = find(lab)
+
+    # Canonicalise
+    canonical_state = _canonicalise(new_statuses_list, label_to_size)
+    return DPState(
+        component_statuses=canonical_state.component_statuses,
+        component_sizes=canonical_state.component_sizes,
+        big_component_finalized=big_finalised,
+    )
+
+
+def _is_state_valid(state: DPState) -> bool:
+    """
+    Reject states where more than one big (size>=4) component is **already**
+    guaranteed to exist: that is, a big component has been finalised *and*
+    another big component is still active in the bag.
+    """
+    if not state.big_component_finalized:
+        return True
+    for sz in state.component_sizes:
+        if sz >= 4:
+            return False
+    return True
+
+
+def _add_to_table(table: Dict[DPState, DPValue], key: DPState, cnt: int, wsum: int):
+    cnt %= MOD
+    wsum %= MOD
+    if key in table:
+        existing = table[key]
+        table[key] = DPValue(count=(existing.count + cnt) % MOD, weight=(existing.weight + wsum) % MOD)
+    else:
+        table[key] = DPValue(count=cnt, weight=wsum)
+
+
+# ---------------------------------------------------------------------------------
+#  Callbacks
+# ---------------------------------------------------------------------------------
+def leaf_callback(
+    graph: Graph,
+    cur_table: Dict[DPState, DPValue],
+    cur_bag_info: Tuple[int, Bag],
+    leaf_vertex: int,
+):
+    w = graph.vertex_weights[leaf_vertex]
+
+    # case 1: vertex OUT
+    state_out = DPState(component_statuses=(0,), component_sizes=(), big_component_finalized=False)
+    _add_to_table(cur_table, state_out, 1, 0)
+
+    # case 2: vertex IN – component id 1, size 1
+    state_in = DPState(component_statuses=(1,), component_sizes=(1,), big_component_finalized=False)
+    _add_to_table(cur_table, state_in, 1, w)
+
+
+def introduce_callback(
+    graph: Graph,
+    cur_table: Dict[DPState, DPValue],
+    cur_bag_info: Tuple[int, Bag],
+    child_table: Dict[DPState, DPValue],
+    child_bag_info: Tuple[int, Bag],
+    introduced_vertex: int,
+):
+    _, B_t = cur_bag_info
+    _, B_child = child_bag_info
+
+    bag_vertices = tuple(sorted(B_t))
+    idx_new = bag_vertices.index(introduced_vertex)
+    w_v = graph.vertex_weights[introduced_vertex]
+
+    for child_state, child_dp_value in child_table.items():
+        cnt_c, w_c = child_dp_value.count, child_dp_value.weight
+        statuses_c = child_state.component_statuses
+        comp_sizes_c = child_state.component_sizes
+        big_flag_c = child_state.big_component_finalized
+
+        # -------- choice A: vertex OUT --------
+        statuses_out = _insert_tuple(statuses_c, idx_new, 0)
+        state_out = DPState(
+            component_statuses=statuses_out, component_sizes=comp_sizes_c, big_component_finalized=big_flag_c
+        )
+        if _is_state_valid(state_out):
+            _add_to_table(cur_table, state_out, cnt_c, w_c)
+
+        # ---------- choice B: vertex IN ----------
+        # new component label = max existing +1
+        next_label = len(comp_sizes_c) + 1
+        statuses_in = list(statuses_c)
+        statuses_in = statuses_in[:idx_new] + [next_label] + statuses_in[idx_new:]  # insert
+        comp_sizes_dict = {i + 1: comp_sizes_c[i] for i in range(len(comp_sizes_c))}
+        comp_sizes_dict[next_label] = 1  # size of new vertex
+
+        # merge with IN-neighbours inside the bag
+        merges: List[Tuple[int, int]] = []
+        for idx_u, u in enumerate(bag_vertices):
+            if idx_u == idx_new:
+                continue
+            if introduced_vertex in graph.neighbors(u):
+                if statuses_in[idx_u] != 0:  # neighbour is IN
+                    merges.append((idx_new, idx_u))
+
+        canonical_state = _canonicalise(statuses_in, comp_sizes_dict)
+        # apply merges via helper
+        if merges:
+            new_state = _state_with_new_components(
+                canonical_state.component_statuses, canonical_state.component_sizes, big_flag_c, bag_vertices, merges
+            )
+        else:
+            new_state = DPState(
+                component_statuses=canonical_state.component_statuses,
+                component_sizes=canonical_state.component_sizes,
+                big_component_finalized=big_flag_c,
+            )
+
+        if not _is_state_valid(new_state):
+            continue
+
+        # weight handling
+        w_new = (w_c + cnt_c * w_v) % MOD
+        _add_to_table(cur_table, new_state, cnt_c, w_new)
+
+
+def forget_callback(
+    graph: Graph,
+    cur_table: Dict[DPState, DPValue],
+    cur_bag_info: Tuple[int, Bag],
+    child_table: Dict[DPState, DPValue],
+    child_bag_info: Tuple[int, Bag],
+    forgotten_vertex: int,
+):
+    _, B_t = cur_bag_info
+    _, B_child = child_bag_info
+    bag_vertices_child = tuple(sorted(B_child))
+    idx_forget = bag_vertices_child.index(forgotten_vertex)
+
+    for child_state, child_dp_value in child_table.items():
+        cnt_c, w_c = child_dp_value.count, child_dp_value.weight
+        statuses_c = child_state.component_statuses
+        comp_sizes_c = child_state.component_sizes
+        big_flag_c = child_state.big_component_finalized
+        lab = statuses_c[idx_forget]
+
+        # project statuses
+        statuses_parent = list(_remove_tuple(statuses_c, idx_forget))
+        comp_sizes_list = list(comp_sizes_c)
+        big_flag = big_flag_c
+
+        if lab != 0:
+            # vertex was IN – check whether its component is forgotten completely
+            remaining = any(l == lab for l in statuses_parent)
+            if not remaining:
+                # component finalises now
+                comp_size = comp_sizes_list[lab - 1]
+                if comp_size >= 4:
+                    if big_flag:  # already had a big one
+                        continue  # invalid
+                    big_flag = True
+                # remove the component from size list
+                comp_sizes_list.pop(lab - 1)
+                # fix labels in statuses_parent > lab
+                for i, x in enumerate(statuses_parent):
+                    if x > lab:
+                        statuses_parent[i] = x - 1
+
+        state_parent = DPState(
+            component_statuses=tuple(statuses_parent),
+            component_sizes=tuple(comp_sizes_list),
+            big_component_finalized=big_flag,
+        )
+        if not _is_state_valid(state_parent):
+            continue
+        _add_to_table(cur_table, state_parent, cnt_c, w_c)
+
+
+def join_callback(
+    graph: Graph,
+    cur_table: Dict[DPState, DPValue],
+    cur_bag_info: Tuple[int, Bag],
+    left_child_table: Dict[DPState, DPValue],
+    left_child_bag_info: Tuple[int, Bag],
+    right_child_table: Dict[DPState, DPValue],
+    right_child_bag_info: Tuple[int, Bag],
+):
+    bag_vertices = tuple(sorted(cur_bag_info[1]))
+    nbag = len(bag_vertices)
+    weights_bag = [graph.vertex_weights[v] for v in bag_vertices]
+
+    # quick index left/right tables by IN/OUT pattern to save pairs
+    pattern_to_left: Dict[Tuple[int, ...], List[Tuple[DPState, DPValue]]] = {}
+    for st, val in left_child_table.items():
+        pattern = tuple(1 if x > 0 else 0 for x in st.component_statuses)
+        pattern_to_left.setdefault(pattern, []).append((st, val))
+
+    for right_state, right_dp_value in right_child_table.items():
+        cnt_r, w_r = right_dp_value.count, right_dp_value.weight
+        pattern = tuple(1 if x > 0 else 0 for x in right_state.component_statuses)
+        if pattern not in pattern_to_left:
+            continue
+        for left_state, left_dp_value in pattern_to_left[pattern]:
+            cnt_l, w_l = left_dp_value.count, left_dp_value.weight
+            # compatibility on big flags
+            if left_state.big_component_finalized and right_state.big_component_finalized:
+                continue  # would give at least 2 big components finalised
+            # Merge connectivity partitions
+            statuses_l = left_state.component_statuses
+            sizes_l = left_state.component_sizes
+            big_l = left_state.big_component_finalized
+            statuses_r = right_state.component_statuses
+            sizes_r = right_state.component_sizes
+            big_r = right_state.big_component_finalized
+
+            # union-find on vertex indices
+            parent = list(range(nbag))
+
+            def find(x):
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            def union(a, b):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[rb] = ra
+
+            # unions from left
+            label_to_vertices = {}
+            for idx, lab in enumerate(statuses_l):
+                if lab == 0:
+                    continue
+                label_to_vertices.setdefault(lab, []).append(idx)
+            for verts in label_to_vertices.values():
+                for a, b in itertools.combinations(verts, 2):
+                    union(a, b)
+
+            # unions from right
+            label_to_vertices = {}
+            for idx, lab in enumerate(statuses_r):
+                if lab == 0:
+                    continue
+                label_to_vertices.setdefault(lab, []).append(idx)
+            for verts in label_to_vertices.values():
+                for a, b in itertools.combinations(verts, 2):
+                    union(a, b)
+
+            # Build groups
+            root_to_indices: Dict[int, List[int]] = {}
+            for i in range(nbag):
+                if pattern[i] == 0:  # OUT vertex doesn't belong to any component
+                    continue
+                r = find(i)
+                root_to_indices.setdefault(r, []).append(i)
+
+            # Maps for quick size lookup
+            labsize_left = {i + 1: sizes_l[i] for i in range(len(sizes_l))}
+            labsize_right = {i + 1: sizes_r[i] for i in range(len(sizes_r))}
+
+            new_statuses = [0] * nbag
+            new_comp_sizes: List[int] = []
+            # Assign new labels
+            for new_label, indices in enumerate(sorted(root_to_indices.values(), key=lambda x: min(x)), start=1):
+                # collect distinct component labels from both sides
+                left_labels = set(statuses_l[i] for i in indices)
+                right_labels = set(statuses_r[i] for i in indices)
+                left_size = sum(labsize_left.get(lab, 0) for lab in left_labels)
+                right_size = sum(labsize_right.get(lab, 0) for lab in right_labels)
+                bag_sz = len(indices)
+                total_sz = min(4, left_size + right_size - bag_sz)  # remove double counted bag
+                new_comp_sizes.append(total_sz)
+                for idx in indices:
+                    new_statuses[idx] = new_label
+
+            big_flag = big_l or big_r
+            merged_state = DPState(
+                component_statuses=tuple(new_statuses),
+                component_sizes=tuple(new_comp_sizes),
+                big_component_finalized=big_flag,
+            )
+            if not _is_state_valid(merged_state):
+                continue
+
+            # bag weight (counted twice, need once)
+            w_bag = 0
+            for idx, inout in enumerate(pattern):
+                if inout:
+                    w_bag += weights_bag[idx]
+            w_bag %= MOD
+
+            # combine counts / weight sums
+            cnt_merge = (cnt_l * cnt_r) % MOD
+            w_merge = (w_l * cnt_r + w_r * cnt_l - w_bag * cnt_merge) % MOD
+
+            _add_to_table(cur_table, merged_state, cnt_merge, w_merge)
+
+
+# ---------------------------------------------------------------------------------
+# Extract final answer
+# ---------------------------------------------------------------------------------
+def extract_solution(root_table: Dict[DPState, DPValue]) -> int:
+    ans = 0
+    for state, dp_value in root_table.items():
+        cnt, wsum = dp_value.count, dp_value.weight
+        big_total = state.big_component_finalized + sum(1 for sz in state.component_sizes if sz >= 4)
+        if big_total == 1:
+            ans = (ans + wsum) % MOD
+    return ans if ans != 0 else -1
+```
+
+## Problem 2
+
+```
+## Description
+
+Task Type: Weighted Model Count (CSP-wMC).
+Explanation:
+    You are given a set of elements, where each element has a weight. Your goal is to compute the sum of weights of all the subsets that satisfy the constraints given below, modulo 10^9 + 7.
+    If there is no feasible set, the result of this task is -1.
+Constraints Definition:
+    In this question, the elements are the vertices of a graph, and the constraints are defined in graph-theoretic terms. A description of the graph family, the constraints, and the vertex weights is given below.
+    The constraints:
+        A set of vertices such that: (1) no two vertices in the set are adjacent, and (2) every vertex outside the set is adjacent to at least one vertex in the set.
+    Input Graph:
+        A connected graph whose tree-width is at most 3, and in whose 'nice tree decomposition' the JOIN nodes have width at most 3 (i.e., every JOIN node contains at most 4 vertices).
+        The following variables are used to represent graphs in this family:
+            - `graph`: The graph.
+            - `n`: The number of vertices in the graph.
+            - `tree_decomposition`: The tree decomposition of the graph.
+    Vertex Weights:
+        Every vertex is assigned an integer weight. The list of weights is given in the variable `x_s`.
+
+## Input
+
+The input is composed of the following items, separated by newlines.
+
+- n:
+    An integer written on a single line.
+
+- x_s:
+    The first line contains a single integer representing the length of the list.
+    The second line contains a list of space-separated integers.
+
+- graph:
+    An undirected graph over the vertex set of non-negative integers (starting at zero).
+    The first line contains a single integer -- the number of vertices in the graph.
+    The second line contains a single integer -- the number of edges in the graph.
+    Every edge of the graph is then printed on a single line, as two space-separated integers.
+
+- tree_decomposition:
+    A tree decomposition of a graph.
+    The first line contains a single integer -- the number of bags in the tree decomposition.
+    The second line contains a single integer -- the number of edges in the tree decomposition.
+    Then, for every bag in the decomposition, there is a single line of space-separated integers, representing the vertices in the bag (the i-th line corresponds to the i-th bag).
+    Finally, every edge joining two bags of the tree decomposition is printed on a single line, as two space-separated integers, in ascending order. Note that the bags of the tree decomposition are indexed by non-negative integers, starting at zero.
+
+## Output
+
+A single integer: the sum of weights of all subsets that satisfy the constraints, modulo 10^9 + 7, or -1 is no such subset exists.
+
+## Constraints
+
+The following constraints must all be satisfied:
+
+n >= 4
+n <= 100
+
+## Time Limit
+
+100.00 seconds per test.
+```
+
+## Solution 2
+
+```python
+from __future__ import annotations
+from dataclasses import dataclass
+from enum import IntEnum
+from typing import Any, ClassVar, Tuple, Type, TypeAlias
+
+MOD: int = 1_000_000_007
+
+Bag: TypeAlias = set[int]
+
+
+class VStatus(IntEnum):
+    """Per-vertex status inside a bag."""
+
+    IN = 0  # vertex is in the independent set
+    OUT_NEEDS = 1  # not in the set, still needs a neighbour in the set
+    OUT_JUST = 2  # not in the set, but already has a neighbour in set
+
+
+@dataclass(frozen=True)
+class DPState:
+    """
+    Represents the state of the dynamic programming algorithm for the Maximal Independent Set problem.
+    This data structure encodes the status of each vertex within a tree decomposition bag.
+
+    The state tracks the selection and justification status of vertices:
+    ( 1 ) vertex_statuses : Tuple[int, ...]   a tuple where each element represents the status
+                                              of the corresponding vertex in the sorted bag.
+                                              Each status is one of VStatus.IN, VStatus.OUT_NEEDS, or VStatus.OUT_JUST:
+                                              - IN: vertex is selected (in the independent set)
+                                              - OUT_NEEDS: vertex is not selected, still needs a neighbor in the set
+                                                           for maximality (violation of maximality constraint)
+                                              - OUT_JUST: vertex is not selected, already has a neighbor in the set
+                                                          (maximality constraint satisfied)
+
+    Implementation notes:
+    - The dataclass is frozen to ensure immutability and hashability for use as dict keys
+    - vertex_statuses maintains the order corresponding to the sorted bag vertices
+    - The VStatus enum provides semantic meaning to the integer status values
+    - This structure enables efficient tracking of both independence and maximality constraints
+    - During DP computation, OUT_NEEDS vertices must be justified (become OUT_JUST) before forgetting
+    - Independence constraint: no two adjacent vertices can both have status IN
+    - Maximality constraint: every OUT vertex must have at least one IN neighbor
+    """
+
+    vertex_statuses: Tuple[int, ...]
+
+
+@dataclass
+class DPValue:
+    """
+    Data structure representing a value stored in the dynamic programming table.
+    This replaces the previous Tuple[int, int] representation with a more
+    structured and self-documenting approach.
+
+    ( 1 ) count        : int             number of distinct vertex subsets that
+                                          achieve the current state configuration.
+                                          This counts the multiplicity of maximal
+                                          independent sets that lead to the same DP state.
+    ( 2 ) weight_sum   : int             total weighted sum across all vertex subsets
+                                          that achieve the current state configuration.
+                                          Each maximal independent set contributes its
+                                          total vertex weight sum to this field.
+
+    Implementation notes:
+    - Both fields are maintained modulo MOD (1,000,000,007) for efficiency
+    - This structure enables tracking both the number of solutions and their
+      cumulative weights simultaneously during the DP computation
+    - When combining values from different DP branches, counts are multiplied
+      and weights are combined according to the weighted model counting principles
+    - The weight_sum field accumulates the total weight contribution from all
+      valid maximal independent set configurations that match the current DP state
+    """
+
+    count: int
+    weight_sum: int
+
+
+def _bag_order(bag: Bag) -> tuple[int, ...]:
+    """Canonical ordering of vertices inside a bag (ascending)."""
+    return tuple(sorted(bag))
+
+
+def _vertex_weight(graph, v: int) -> int:
+    """Return the (already modulo-reduced) weight of vertex v."""
+    return graph.vertex_weights[v] % MOD
+
+
+def _add_entry(
+    table: dict[DPState, DPValue],
+    state: DPState,
+    cnt: int,
+    wsum: int,
+) -> None:
+    """Insert / accumulate an entry into a DP table (mod MOD)."""
+    if state in table:
+        existing = table[state]
+        table[state] = DPValue(count=(existing.count + cnt) % MOD, weight_sum=(existing.weight_sum + wsum) % MOD)
+    else:
+        table[state] = DPValue(count=cnt % MOD, weight_sum=wsum % MOD)
+
+
+def _sum_weight_of_in_vertices(state: DPState, bag_order: tuple[int, ...], graph) -> int:
+    """Sum of weights of the vertices that are IN according to <state>."""
+    total = 0
+    for s, v in zip(state.vertex_statuses, bag_order):
+        if s == VStatus.IN:
+            total += graph.vertex_weights[v]
+    return total % MOD
+
+
+def leaf_callback(
+    graph: Graph,
+    cur_table: dict[DPState, DPValue],
+    cur_bag_info: tuple[int, Bag],
+    leaf_vertex: int,
+):
+    """
+    Bag  = {leaf_vertex}.  Two possibilities:
+        1) vertex is IN                                (weight = w_v)
+        2) vertex is OUT and still needs justification (weight = 0)
+    """
+
+    # Vertex is IN
+    state_in = DPState(vertex_statuses=(VStatus.IN,))
+    cnt_in = 1
+    w_in = graph.vertex_weights[leaf_vertex] % MOD
+    _add_entry(cur_table, state_in, cnt_in, w_in)
+
+    # Vertex is OUT (needs justification – no neighbour yet)
+    state_out_needs = DPState(vertex_statuses=(VStatus.OUT_NEEDS,))
+    _add_entry(cur_table, state_out_needs, 1, 0)
+
+
+def introduce_callback(
+    graph: Graph,
+    cur_table: dict[DPState, DPValue],
+    cur_bag_info: tuple[int, Bag],
+    child_table: dict[DPState, DPValue],
+    child_bag_info: tuple[int, Bag],
+    introduced_vertex: int,
+):
+    """
+    Parent bag = child bag U {introduced_vertex}
+    Enumerate both possibilities for the new vertex (IN / OUT) and
+    update the status of old vertices if the new vertex is chosen IN.
+    """
+    parent_bag_set = cur_bag_info[1]
+    child_bag_set = child_bag_info[1]
+
+    parent_order = _bag_order(parent_bag_set)
+    child_order = _bag_order(child_bag_set)
+
+    # Pre-compute adjacency of introduced_vertex to every vertex in child bag
+    adj_to_new = {u for u in graph.neighbors(introduced_vertex) if u in child_bag_set}
+
+    idx_new_in_parent = parent_order.index(introduced_vertex)
+
+    for child_state, child_value in child_table.items():
+        cnt, wsum = child_value.count, child_value.weight_sum
+        child_statuses = child_state.vertex_statuses
+
+        # Convert child_state (tuple over child_order) into a mutable list
+        for_new_parent_base = [None] * len(parent_order)
+        # Copy old statuses
+        for pos_child, v in enumerate(child_order):
+            pos_parent = parent_order.index(v)
+            for_new_parent_base[pos_parent] = child_statuses[pos_child]
+
+        # ------------------------------------------------------------------
+        # Option 1 : introduced_vertex  is  IN
+        # ------------------------------------------------------------------
+        # Independence test: must not be adjacent to an already-IN vertex
+        independence_ok = True
+        for pos_child, v in enumerate(child_order):
+            if v in adj_to_new and child_statuses[pos_child] == VStatus.IN:
+                independence_ok = False
+                break
+
+        if independence_ok:
+            new_statuses = for_new_parent_base.copy()
+
+            # Insert the status for the new vertex
+            new_statuses[idx_new_in_parent] = VStatus.IN
+
+            # The new IN vertex may justify some previously un-justified OUTs
+            for pos_child, v in enumerate(child_order):
+                if v in adj_to_new and child_statuses[pos_child] == VStatus.OUT_NEEDS:
+                    pos_parent = parent_order.index(v)
+                    new_statuses[pos_parent] = VStatus.OUT_JUST
+
+            state_new = DPState(vertex_statuses=tuple(new_statuses))
+            w_new = (wsum + cnt * _vertex_weight(graph, introduced_vertex)) % MOD
+            _add_entry(cur_table, state_new, cnt, w_new)
+
+        # ------------------------------------------------------------------
+        # Option 2 : introduced_vertex  is  OUT
+        # ------------------------------------------------------------------
+        has_in_neighbour = any(
+            child_statuses[pos_child] == VStatus.IN for pos_child, v in enumerate(child_order) if v in adj_to_new
+        )
+        status_new_vertex = VStatus.OUT_JUST if has_in_neighbour else VStatus.OUT_NEEDS
+
+        new_statuses = for_new_parent_base.copy()
+        new_statuses[idx_new_in_parent] = status_new_vertex
+        state_new = DPState(vertex_statuses=tuple(new_statuses))
+        _add_entry(cur_table, state_new, cnt, wsum)
+
+
+def forget_callback(
+    graph: Graph,
+    cur_table: dict[DPState, DPValue],
+    cur_bag_info: tuple[int, Bag],
+    child_table: dict[DPState, DPValue],
+    child_bag_info: tuple[int, Bag],
+    forgotten_vertex: int,
+):
+    """
+    Parent bag = child bag \ {forgotten_vertex}.
+    If the forgotten vertex is OUT_NEEDS, the partial solution is invalid.
+    Otherwise just drop it from the tuple and carry over the counters.
+    """
+    child_order = _bag_order(child_bag_info[1])
+
+    idx_forgot_in_child = child_order.index(forgotten_vertex)
+
+    for child_state, child_value in child_table.items():
+        cnt, wsum = child_value.count, child_value.weight_sum
+        child_statuses = child_state.vertex_statuses
+        status_of_forgotten = child_statuses[idx_forgot_in_child]
+        if status_of_forgotten == VStatus.OUT_NEEDS:
+            # Maximality violated – discard
+            continue
+
+        new_statuses = tuple(child_statuses[i] for i in range(len(child_statuses)) if i != idx_forgot_in_child)
+        new_state = DPState(vertex_statuses=new_statuses)
+        _add_entry(cur_table, new_state, cnt, wsum)
+
+
+def join_callback(
+    graph: Graph,
+    cur_table: dict[DPState, DPValue],
+    cur_bag_info: tuple[int, Bag],
+    left_child_table: dict[DPState, DPValue],
+    left_child_bag_info: tuple[int, Bag],
+    right_child_table: dict[DPState, DPValue],
+    right_child_bag_info: tuple[int, Bag],
+):
+    """
+    Bag is identical in both children.  Two states are compatible iff
+        – they agree on which vertices are IN
+    For vertices that are OUT, the merged justification is the logical OR.
+    """
+    bag_set = cur_bag_info[1]
+    bag_order = _bag_order(bag_set)
+
+    # Iterate over all pairs (small tables – bag size ≤ 4 ⇒ ≤ 81 states)
+    for state_left, left_value in left_child_table.items():
+        cnt_l, w_l = left_value.count, left_value.weight_sum
+        for state_right, right_value in right_child_table.items():
+            cnt_r, w_r = right_value.count, right_value.weight_sum
+            compatible = True
+            merged_status = []
+
+            left_statuses, right_statuses = state_left.vertex_statuses, state_right.vertex_statuses
+            for s_l, s_r in zip(left_statuses, right_statuses):
+                if s_l == VStatus.IN or s_r == VStatus.IN:
+                    # Both have to be IN to be compatible
+                    if s_l != VStatus.IN or s_r != VStatus.IN:
+                        compatible = False
+                        break
+                    merged_status.append(VStatus.IN)
+                else:
+                    # Both OUT-something; merged justification is OR
+                    if s_l == VStatus.OUT_JUST or s_r == VStatus.OUT_JUST:
+                        merged_status.append(VStatus.OUT_JUST)
+                    else:
+                        merged_status.append(VStatus.OUT_NEEDS)
+
+            if not compatible:
+                continue
+
+            merged_state = DPState(vertex_statuses=tuple(merged_status))
+
+            cnt_merge = (cnt_l * cnt_r) % MOD
+
+            weight_bag_in = _sum_weight_of_in_vertices(merged_state, bag_order, graph)
+
+            w_merge = (w_l * cnt_r + w_r * cnt_l - cnt_merge * weight_bag_in) % MOD
+            _add_entry(cur_table, merged_state, cnt_merge, w_merge)
+
+
+def extract_solution(root_table: dict[DPState, DPValue]) -> int:
+    """
+    Sum the weights of all fully valid maximal independent sets.
+    A state is valid iff no vertex is in OUT_NEEDS state.
+    """
+    total = 0
+    for state, value in root_table.items():
+        if any(s == VStatus.OUT_NEEDS for s in state.vertex_statuses):
+            continue
+        total = (total + value.weight_sum) % MOD
+
+    return total if total != 0 else -1
+```
+
+## Problem 3
+
+```
+## Description
+
+Task Type: Weighted Model Count (CSP-wMC).
+Explanation:
+    You are given a set of elements, where each element has a weight. Your goal is to compute the sum of weights of all the subsets that satisfy the constraints given below, modulo 10^9 + 7.
+    If there is no feasible set, the result of this task is -1.
+Constraints Definition:
+    In this question, the elements are the vertices of a graph, and the constraints are defined in graph-theoretic terms. A description of the graph family, the constraints, and the vertex weights is given below.
+    The constraints:
+        A set of vertices such that the graph induced by these vertices contains no induced square (C4). An induced C4 consists of 4 vertices that form a cycle of length 4 with no additional edges between them. The induced graph may contain triangles, longer cycles, or be acyclic, but must not contain any 4 vertices that induce a square.
+    Input Graph:
+        A connected graph whose tree-width is at most 3, and in whose 'nice tree decomposition' the JOIN nodes have width at most 2 (i.e., every JOIN node contains at most 3 vertices).
+        The following variables are used to represent graphs in this family:
+            - `graph`: The graph.
+            - `n`: The number of vertices in the graph.
+            - `tree_decomposition`: The tree decomposition of the graph.
+    Vertex Weights:
+        Every vertex is assigned an integer weight. The list of weights is given in the variable `x_s`.
+
+## Input
+
+The input is composed of the following items, separated by newlines.
+
+- n:
+    An integer written on a single line.
+
+- x_s:
+    The first line contains a single integer representing the length of the list.
+    The second line contains a list of space-separated integers.
+
+- graph:
+    An undirected graph over the vertex set of non-negative integers (starting at zero).
+    The first line contains a single integer -- the number of vertices in the graph.
+    The second line contains a single integer -- the number of edges in the graph.
+    Every edge of the graph is then printed on a single line, as two space-separated integers.
+
+- tree_decomposition:
+    A tree decomposition of a graph.
+    The first line contains a single integer -- the number of bags in the tree decomposition.
+    The second line contains a single integer -- the number of edges in the tree decomposition.
+    Then, for every bag in the decomposition, there is a single line of space-separated integers, representing the vertices in the bag (the i-th line corresponds to the i-th bag).
+    Finally, every edge joining two bags of the tree decomposition is printed on a single line, as two space-separated integers, in ascending order. Note that the bags of the tree decomposition are indexed by non-negative integers, starting at zero.
+
+## Output
+
+A single integer: the sum of weights of all subsets that satisfy the constraints, modulo 10^9 + 7, or -1 is no such subset exists.
+
+## Constraints
+
+The following constraints must all be satisfied:
+
+n >= 4
+n <= 100
+
+## Time Limit
+
+100.00 seconds per test.
+```
+
+## Solution 3
+
+```python
+from __future__ import annotations
+import sys
+from dataclasses import dataclass
+from typing import Any, ClassVar, Dict, FrozenSet, Tuple, Type, TypeAlias
+
+# ------------------------------------------------------------------
+# Constant
+# ------------------------------------------------------------------
+MOD = 1_000_000_007
+
+
+@dataclass(frozen=True)
+class DPState:
+    """
+    Dynamic Programming State for Square-Free Formula WMC computation.
+
+    This dataclass encapsulates the state information needed during tree decomposition
+    based dynamic programming for weighted model counting of square-free graphs.
+
+    The DP state tracks:
+    1. Which vertices in the current bag are selected (included in the solution)
+    2. Which pairs of non-adjacent vertices have a common neighbor that was forgotten
+       (flagged pairs that could potentially form a 4-cycle if two more vertices connect them)
+
+    Fields:
+    -------
+    selected_vertices : FrozenSet[int]
+        The set of vertices in the current bag that are included in the candidate
+        vertex subset X. These are the vertices that contribute to the solution's
+        weight and must satisfy the square-free constraint.
+
+    flagged_pairs : FrozenSet[Tuple[int, int]]
+        A set of vertex pairs (u, v) where:
+        - u and v are both in the current bag and both selected
+        - u and v are not adjacent to each other
+        - There exists a previously forgotten selected vertex w such that w was adjacent
+          to both u and v
+        This tracking is essential because if u and v later become connected
+        through two additional vertices, they would form an induced 4-cycle (square),
+        violating the square-free constraint.
+
+    Implementation Notes:
+    --------------------
+    - Both fields are frozen sets to ensure immutability and hashability
+    - The pairs in flagged_pairs are stored as sorted tuples for consistency
+    - This state representation enables efficient detection of potential squares
+      during the dynamic programming computation
+    """
+
+    selected_vertices: FrozenSet[int]
+    flagged_pairs: FrozenSet[Tuple[int, int]]
+
+
+@dataclass
+class DPValue:
+    """
+    Dynamic Programming Value for Square-Free Formula WMC computation.
+
+    This dataclass encapsulates the aggregated computational results associated with
+    each DP state during tree decomposition based dynamic programming for weighted
+    model counting of square-free graphs.
+
+    The DP value represents the cumulative information about all valid vertex subset
+    configurations that can be extended from a particular DP state:
+
+    1. **Count Component**: The total number of distinct valid vertex subset
+       configurations (realizations) that satisfy the square-free constraint and
+       can be formed by extending the current DP state to include vertices from
+       the subtree rooted at the current bag.
+
+    2. **Weight Sum Component**: The sum of weighted contributions from all valid
+       configurations, where each configuration's weight is computed as the sum
+       of vertex weights of all selected vertices across the entire subtree.
+
+    Fields:
+    -------
+    count : int
+        The number of valid vertex subset realizations that can be extended from
+        the associated DP state. This represents how many different ways we can
+        complete the partial solution represented by the DP state while maintaining
+        the square-free constraint.
+
+        - Always non-negative
+        - Computed modulo MOD to prevent integer overflow
+        - Accumulated through DP operations: leaf initialization, vertex introduction,
+          vertex forgetting, and subtree joining
+
+    weight_sum : int
+        The aggregate weighted sum across all valid realizations from the associated
+        DP state. For each valid realization, its weight is the sum of vertex weights
+        of all selected vertices in the entire subtree. This field accumulates these
+        weights across all possible realizations.
+
+        - Always non-negative
+        - Computed modulo MOD to prevent integer overflow
+        - The final answer to the WMC problem is the sum of weight_sum values
+          across all root DP states
+
+    Mathematical Relationship:
+    -------------------------
+    For a DP state S with value V = DPValue(count=c, weight_sum=w):
+    - c represents |{valid realizations extending S}|
+    - w represents Σ(vertex_weights(realization)) for all valid realizations extending S
+
+    Implementation Notes:
+    --------------------
+    - The dataclass is mutable to allow efficient updates during DP computation
+    - Values are always kept in the range [0, MOD-1] through modular reduction
+    - The weight_sum field directly contributes to the final WMC answer at the root
+    """
+
+    count: int
+    weight_sum: int
+
+
+Bag: TypeAlias = set[int]
+
+
+# ------------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------------
+def _edges_between(vertices: Tuple[int, ...], graph_adj: list[set[int]]) -> int:
+    """
+    Counts the number of edges inside the given vertex tuple
+    """
+    e = 0
+    m = len(vertices)
+    for i in range(m):
+        for j in range(i + 1, m):
+            if vertices[j] in graph_adj[vertices[i]]:
+                e += 1
+    return e
+
+
+def _has_induced_C4(selected_vertices: FrozenSet[int], graph: Graph) -> bool:
+    """
+    Checks (only) for an induced C4 *inside* the supplied vertex set.
+    Because the current bag size is ≤ 4, this boils down to:
+        – If |selected| == 4, verify whether those 4 vertices form a chord-less 4–cycle.
+        – Otherwise: impossible inside the bag.
+    """
+    if len(selected_vertices) != 4:
+        return False
+
+    vertices = tuple(selected_vertices)
+    # Within a 4-cycle each vertex has degree exactly two and total edges = 4
+    edge_cnt = 0
+    deg = [0] * 4
+    for i in range(4):
+        for j in range(i + 1, 4):
+            if vertices[j] in graph.neighbors(vertices[i]):
+                edge_cnt += 1
+                deg[i] += 1
+                deg[j] += 1
+    return edge_cnt == 4 and all(d == 2 for d in deg)
+
+
+def _bag_selected_weight(selected_vertices: FrozenSet[int], vertex_weights: list[int]) -> int:
+    """
+    Returns the sum of vertex weights of the vertices that are
+    selected *inside the bag*.
+    """
+    return sum(vertex_weights[v] for v in selected_vertices) % MOD
+
+
+def _add_to_table(
+    table: Dict[DPState, DPValue],
+    state: DPState,
+    cnt: int,
+    wsum: int,
+) -> None:
+    """
+    Adds (cnt, wsum) to the entry `state` in `table`, aggregating with modulo arithmetic.
+    """
+    if state in table:
+        prev_value = table[state]
+        table[state] = DPValue(count=(prev_value.count + cnt) % MOD, weight_sum=(prev_value.weight_sum + wsum) % MOD)
+    else:
+        table[state] = DPValue(count=cnt % MOD, weight_sum=wsum % MOD)
+
+
+# ------------------------------------------------------------------
+# 1. Leaf handler
+# ------------------------------------------------------------------
+def leaf_callback(
+    graph: Graph,
+    cur_table: Dict[DPState, DPValue],
+    cur_bag_info: Tuple[int, Bag],
+    leaf_vertex: int,
+):
+    """
+    Initializes DP for a leaf bag {leaf_vertex}.
+    Two possibilities: leaf_vertex OUT or IN.
+    """
+    w_v = graph.vertex_weights[leaf_vertex] % MOD
+
+    # Case 1: vertex OUT
+    state_out = DPState(selected_vertices=frozenset(), flagged_pairs=frozenset())
+    _add_to_table(cur_table, state_out, 1, 0)
+
+    # Case 2: vertex IN
+    state_in = DPState(selected_vertices=frozenset({leaf_vertex}), flagged_pairs=frozenset())
+    _add_to_table(cur_table, state_in, 1, w_v)
+
+
+# ------------------------------------------------------------------
+# 2. Introduce handler
+# ------------------------------------------------------------------
+def introduce_callback(
+    graph: Graph,
+    cur_table: Dict[DPState, DPValue],
+    cur_bag_info: Tuple[int, Bag],
+    child_table: Dict[DPState, DPValue],
+    child_bag_info: Tuple[int, Bag],
+    introduced_vertex: int,
+):
+    """
+    Extends every child state by either putting `introduced_vertex` OUT
+    (do nothing) or IN (add vertex, update weight, check for local C4).
+    """
+    w_v = graph.vertex_weights[introduced_vertex] % MOD
+
+    for state_child, value_child in child_table.items():
+        cnt_child, w_child = value_child.count, value_child.weight_sum
+        # ------------- Choice 1: introduced OUT ------------------
+        state_out = DPState(selected_vertices=state_child.selected_vertices, flagged_pairs=state_child.flagged_pairs)
+        _add_to_table(cur_table, state_out, cnt_child, w_child)
+
+        # ------------- Choice 2: introduced IN -------------------
+        sel_parent = frozenset(set(state_child.selected_vertices) | {introduced_vertex})
+
+        # Any pair that involves the newly introduced vertex starts with flag = False
+        pair_parent = state_child.flagged_pairs  # identical (new pairs not yet flagged)
+
+        # Validity check 1: no induced C4 fully contained in the new bag
+        if _has_induced_C4(sel_parent, graph):
+            continue  # skip invalid
+
+        # Validity check 2: An induced C4 can also be formed when the introduced vertex is the neighbor of two
+        # flagged pairs.
+        is_valid = True
+        v_adj = graph.neighbors(introduced_vertex)
+        for x, y in state_child.flagged_pairs:
+            if x in v_adj and y in v_adj:
+                # by definition of flagged_pairs, (x, y) are selected, not adjacent to each other, and are adjacent to
+                # a forgotten selected vertex w, hence forming a C4 with the introduced vertex.
+                assert x not in graph.neighbors(y) and y not in graph.neighbors(x)
+                assert x in state_child.selected_vertices and y in state_child.selected_vertices
+                is_valid = False
+
+        if not is_valid:
+            continue
+
+        # Update aggregates
+        cnt_parent = cnt_child  # same number of realisations
+        w_parent = (w_child + cnt_child * w_v) % MOD
+
+        state_in = DPState(selected_vertices=sel_parent, flagged_pairs=pair_parent)
+        _add_to_table(cur_table, state_in, cnt_parent, w_parent)
+
+
+# ------------------------------------------------------------------
+# 3. Forget handler
+# ------------------------------------------------------------------
+def forget_callback(
+    graph: Graph,
+    cur_table: Dict[DPState, DPValue],
+    cur_bag_info: Tuple[int, Bag],
+    child_table: Dict[DPState, DPValue],
+    child_bag_info: Tuple[int, Bag],
+    forgotten_vertex: int,
+):
+    """
+    Removes `forgotten_vertex` from the bag and projects the child DP states.
+    Handles:
+        – creating new common-neighbour flags caused by the forgotten vertex,
+        – pruning configurations that already contain an induced C4 with the
+          soon-to-be forgotten vertex.
+    """
+    for state_child, value_child in child_table.items():
+        cnt_child, w_child = value_child.count, value_child.weight_sum
+        sel_child = state_child.selected_vertices
+        pair_child = state_child.flagged_pairs
+
+        # Build parent selected set
+        sel_parent_tmp = set(sel_child)
+        sel_parent_tmp.discard(forgotten_vertex)
+        sel_parent = frozenset(sel_parent_tmp)
+
+        # Build parent pair set: remove any pair involving the forgotten vertex
+        pair_parent_tmp = {p for p in pair_child if forgotten_vertex not in p}
+
+        # If the forgotten vertex is **selected**, it can create new
+        #  "hasCommonNeighbour" flags for pairs (u, v)
+        if forgotten_vertex in sel_child:
+            forgotten_v_adj = graph.neighbors(forgotten_vertex)
+            sel_remaining = [v for v in sel_parent if v in forgotten_v_adj]
+            m = len(sel_remaining)
+            for i in range(m):
+                for j in range(i + 1, m):
+                    u, v = sel_remaining[i], sel_remaining[j]
+                    if v not in graph.neighbors(u):  # they are *non-adjacent*
+                        pair_parent_tmp.add(tuple(sorted((u, v))))
+
+        state_parent = DPState(selected_vertices=sel_parent, flagged_pairs=frozenset(pair_parent_tmp))
+        _add_to_table(cur_table, state_parent, cnt_child, w_child)
+
+
+# ------------------------------------------------------------------
+# 4. Join handler
+# ------------------------------------------------------------------
+def join_callback(
+    graph: Graph,
+    cur_table: Dict[DPState, DPValue],
+    cur_bag_info: Tuple[int, Bag],
+    left_child_table: Dict[DPState, DPValue],
+    left_child_bag_info: Tuple[int, Bag],
+    right_child_table: Dict[DPState, DPValue],
+    right_child_bag_info: Tuple[int, Bag],
+):
+    """
+    Merges the DP tables coming from the two sub-trees.
+    A merge is possible iff the chosen vertices inside the bag are identical.
+    Pair flags are OR-ed.
+    The counting / weight aggregation follows the formula:
+
+        cnt  = cnt_L * cnt_R
+        wSum = w_L * cnt_R + w_R * cnt_L − cnt_L * cnt_R * weight(bag_selection)
+    """
+    vertex_weights = graph.vertex_weights
+
+    # Compatible states must have the same selected vertices.
+    # Bucket tables by their selected set for fast compatibility filtering
+    bucket_left: Dict[FrozenSet[int], list[Tuple[FrozenSet[Tuple[int, int]], DPValue]]] = {}
+    for state, val in left_child_table.items():
+        sel = state.selected_vertices
+        pair = state.flagged_pairs
+        bucket_left.setdefault(sel, []).append((pair, val))
+
+    bucket_right: Dict[FrozenSet[int], list[Tuple[FrozenSet[Tuple[int, int]], DPValue]]] = {}
+    for state, val in right_child_table.items():
+        sel = state.selected_vertices
+        pair = state.flagged_pairs
+        bucket_right.setdefault(sel, []).append((pair, val))
+
+    for sel in bucket_left.keys() & bucket_right.keys():
+        bag_sel_weight = _bag_selected_weight(sel, vertex_weights)
+        entries_left = bucket_left[sel]
+        entries_right = bucket_right[sel]
+
+        for pair_L, value_L in entries_left:
+            for pair_R, value_R in entries_right:
+                # Merge validity check: when the same flagged pair appears in both children, the corresponding
+                # forgotten vertices w,z must be distinct due to the tree decomposition properties - the bag is
+                # a separator. Hence, such a case forms a C4 and is invalid.
+                if pair_L & pair_R:
+                    # Note the pairs are sorted tuples so intersection is safe
+                    continue
+
+                # Merge pairs: union of flagged pairs
+                pair_merged = frozenset(pair_L | pair_R)
+                cnt_L, w_L = value_L.count, value_L.weight_sum
+                cnt_R, w_R = value_R.count, value_R.weight_sum
+                cnt = (cnt_L * cnt_R) % MOD
+                w_sum = ((w_L * cnt_R % MOD) + (w_R * cnt_L % MOD) - (cnt_L * cnt_R % MOD) * bag_sel_weight) % MOD
+                state = DPState(selected_vertices=sel, flagged_pairs=pair_merged)
+                _add_to_table(cur_table, state, cnt, w_sum)
+
+
+# ------------------------------------------------------------------
+# 5. Final extraction at the root
+# ------------------------------------------------------------------
+def extract_solution(root_table: Dict[DPState, DPValue]) -> int:
+    """
+    The root table already contains fully validated configurations
+    (all vertex obligations fulfilled, no C4 ever formed).
+    The answer is the sum of the aggregate weight component of every state.
+    """
+    if not root_table:
+        return -1
+
+    answer = 0
+    for state, value in root_table.items():
+        answer = (answer + value.weight_sum) % MOD
+    return answer
+```
