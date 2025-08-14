@@ -1,0 +1,6 @@
+annotated-types==0.7.0
+typing-inspection==0.4.1
+typing_extensions==4.14.1
+tqdm==4.67.1
+boto3==1.39.14
+cachetools==6.1.0
